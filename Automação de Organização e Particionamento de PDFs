@@ -1,0 +1,320 @@
+O que este script faz:
+Isolamento por Secretaria: Lê as subpastas de primeiro nível (SEMAD, SEMDS, SEMED) de forma totalmente independente, sem misturar os acervos.
+
+Preservação dos Originais: Trabalha em modo de leitura e grava toda a saída na pasta espelho Resultado_Geral_48MB, mantendo os arquivos originais intocados.
+
+Particionamento Lossless (pypdf): Divide página por página qualquer PDF que ultrapasse 48 MB (usando margem de segurança de 0,2 MB) sem recomprimir imagens ou perder resolução.
+
+Ordenação e Nomenclatura Cronológica (re): Identifica ano, mês e número da medição nos nomes dos arquivos/pastas para ordenar tudo no tempo e nomear os lotes (ex: 01_2020-02_a_2020-06 (15a_a_19a_Med)).
+
+Empacotamento Bit-Perfect (zipfile): Gera arquivos .zip em modo ZIP_STORED (sem alteração de bytes) prontos para upload em sistemas de protocolo.
+
+Parte 1: Preparação do Ambiente (Fazer apenas uma vez no computador)
+Instalar a biblioteca pypdf:
+
+Aperte a tecla Windows, digite cmd e aperte Enter.
+
+Na tela preta, digite o comando abaixo e aperte Enter:
+
+DOS
+pip install pypdf
+Salvar o arquivo do script:
+
+Abra o Bloco de Notas.
+
+Cole o código completo da Parte 3 abaixo.
+
+Clique em Arquivo > Salvar Como.
+
+Vá até a pasta C:\Users\ISRAEL.FERREIRA\Desktop\Medicao_PDF (na raiz, fora das pastas das secretarias).
+
+Mude o campo "Tipo" de Documentos de texto (*.txt) para Todos os arquivos (*.*).
+
+Em "Nome", digite exatamente: organizar_48mb.py e clique em Salvar.
+
+Parte 2: Como Executar Sempre que Precisar
+Abra o Prompt de Comando (CMD) (tecla Windows > cmd > Enter).
+
+Entre na pasta de trabalho digitando:
+
+DOS
+cd C:\Users\ISRAEL.FERREIRA\Desktop\Medicao_PDF
+Execute o script digitando:
+
+DOS
+python organizar_48mb.py
+Aguarde a mensagem CONCLUÍDO! na tela e abra a pasta Resultado_Geral_48MB para pegar os pacotes .zip prontos.(Nota: Se você adicionar novos PDFs nas pastas originais e rodar o comando novamente, o script apaga o resultado anterior e gera tudo atualizado automaticamente).
+
+Parte 3: Código-Fonte Completo (organizar_48mb.py)
+Python
+import io
+import re
+import shutil
+import zipfile
+from datetime import datetime
+from pathlib import Path
+from pypdf import PdfReader, PdfWriter
+
+# ==============================================================================
+# CONFIGURAÇÕES GERAIS
+# ==============================================================================
+PASTA_RAIZ = r"C:\Users\ISRAEL.FERREIRA\Desktop\Medicao_PDF"
+NOME_PASTA_SAIDA = "Resultado_Geral_48MB"
+
+LIMITE_MB = 48.0
+MARGEM_SEGURANCA_MB = 0.2
+
+LIMITE_BYTES_EXATO = int(LIMITE_MB * 1024 * 1024)
+LIMITE_BYTES_SEGURO = int((LIMITE_MB - MARGEM_SEGURANCA_MB) * 1024 * 1024)
+
+MESES_MAP = {
+    "janeiro": "01", "jan": "01",
+    "fevereiro": "02", "fev": "02",
+    "marco": "03", "março": "03", "mar": "03",
+    "abril": "04", "abr": "04",
+    "maio": "05", "mai": "05",
+    "junho": "06", "jun": "06",
+    "julho": "07", "jul": "07",
+    "agosto": "08", "ago": "08",
+    "setembro": "09", "set": "09",
+    "outubro": "10", "out": "10",
+    "novembro": "11", "nov": "11",
+    "dezembro": "12", "dez": "12",
+}
+
+
+def extrair_metadados_cronologicos(caminho: Path):
+    """Extrai ano, mês, número da medição e parte para ordenação e nomeação."""
+    texto_busca = f"{caminho.parent.name} {caminho.stem}".lower()
+
+    match_med = re.search(r"(\d+)\s*[ªºa]?\s*medi[cç][aã]o", texto_busca)
+    if not match_med:
+        match_med = re.search(r"\b(\d+)\b", caminho.stem.lower())
+    num_medicao = int(match_med.group(1)) if match_med else 999999
+
+    match_parte = re.search(r"parte[_\s-]*(\d+)", texto_busca)
+    num_parte = int(match_parte.group(1)) if match_parte else 0
+
+    match_ano = re.search(r"\b(20[1-3]\d)\b", texto_busca)
+    ano = int(match_ano.group(1)) if match_ano else None
+
+    mes_str = None
+    for palavra_mes, numero_mes in MESES_MAP.items():
+        if re.search(rf"\b{palavra_mes}\b", texto_busca):
+            mes_str = numero_mes
+            break
+
+    if not ano or not mes_str:
+        match_iso = re.search(r"(20[1-3]\d)[._-](0[1-9]|1[0-2])", texto_busca)
+        match_br = re.search(r"(0[1-9]|1[0-2])[._-](20[1-3]\d)", texto_busca)
+        if match_iso:
+            ano, mes_str = int(match_iso.group(1)), match_iso.group(2)
+        elif match_br:
+            mes_str, ano = match_br.group(1), int(match_br.group(2))
+
+    if ano and mes_str:
+        mes_int = int(mes_str)
+        rotulo_data = f"{ano}-{mes_str}"
+    else:
+        dt = datetime.fromtimestamp(caminho.stat().st_mtime)
+        ano, mes_int = dt.year, dt.month
+        rotulo_data = dt.strftime("%Y-%m-%d")
+
+    rotulo_medicao = f"{num_medicao}a_Med" if num_medicao != 999999 else ""
+    return (ano, mes_int, num_medicao, num_parte, rotulo_data, rotulo_medicao)
+
+
+def chave_ordenacao_cronologica(caminho: Path):
+    ano, mes_int, num_medicao, num_parte, _, _ = extrair_metadados_cronologicos(caminho)
+    return (ano, mes_int, num_medicao, num_parte, caminho.name.lower())
+
+
+def gerar_nome_pasta_cronologica(indice_pacote: int, arquivos_do_pacote: list[Path]) -> str:
+    primeiro = extrair_metadados_cronologicos(arquivos_do_pacote[0])
+    ultimo = extrair_metadados_cronologicos(arquivos_do_pacote[-1])
+
+    data_ini, med_ini = primeiro[4], primeiro[5]
+    data_fim, med_fim = ultimo[4], ultimo[5]
+
+    bloco_data = data_ini if data_ini == data_fim else f"{data_ini}_a_{data_fim}"
+
+    if med_ini and med_fim:
+        bloco_med = med_ini if med_ini == med_fim else f"{med_ini}_a_{med_fim}"
+        nome_bruto = f"{indice_pacote:02d}_{bloco_data} ({bloco_med})"
+    else:
+        nome_bruto = f"{indice_pacote:02d}_{bloco_data}"
+
+    return re.sub(r'[<>:"/\\|?*]', "-", nome_bruto)
+
+
+def obter_tamanho_writer(writer: PdfWriter) -> int:
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.tell()
+
+
+def etapa_1_adequar_pdfs(pasta_origem: Path, pasta_temp_adequados: Path) -> list[Path]:
+    """Busca PDFs em toda a árvore da secretaria (.rglob) e particiona os > 48 MB sem perda."""
+    arquivos_originais = sorted(
+        [p for p in pasta_origem.rglob("*") if p.is_file() and p.suffix.lower() == ".pdf"],
+        key=chave_ordenacao_cronologica
+    )
+    if not arquivos_originais:
+        return []
+
+    print(f"   Total encontrado em {pasta_origem.name}: {len(arquivos_originais)} PDF(s)\n")
+
+    for caminho_pdf in arquivos_originais:
+        tamanho_original = caminho_pdf.stat().st_size
+        tamanho_mb = tamanho_original / (1024 * 1024)
+
+        nome_destino = caminho_pdf.name
+        contador = 1
+        while (pasta_temp_adequados / nome_destino).exists():
+            nome_destino = f"{caminho_pdf.stem}_{contador}{caminho_pdf.suffix}"
+            contador += 1
+
+        if tamanho_original <= LIMITE_BYTES_SEGURO:
+            shutil.copy2(caminho_pdf, pasta_temp_adequados / nome_destino)
+            print(f"   [OK - MANTIDO]  {nome_destino} ({tamanho_mb:.2f} MB)")
+            continue
+
+        print(f"   [DIVIDINDO]     {nome_destino} ({tamanho_mb:.2f} MB)...")
+        leitor = PdfReader(str(caminho_pdf))
+        total_paginas = len(leitor.pages)
+
+        writer_atual = PdfWriter()
+        parte = 1
+        paginas_na_parte = 0
+        stem_destino = Path(nome_destino).stem
+
+        for indice_pagina in range(total_paginas):
+            pagina = leitor.pages[indice_pagina]
+            writer_atual.add_page(pagina)
+            paginas_na_parte += 1
+
+            if obter_tamanho_writer(writer_atual) > LIMITE_BYTES_SEGURO:
+                if paginas_na_parte == 1:
+                    nome_saida = f"{stem_destino}_Parte_{parte:02d}_ALERTA_PAGINA_UNICA.pdf"
+                    caminho_saida = pasta_temp_adequados / nome_saida
+                    with open(caminho_saida, "wb") as f_out:
+                        writer_atual.write(f_out)
+                    writer_atual = PdfWriter()
+                    parte += 1
+                    paginas_na_parte = 0
+                else:
+                    writer_valido = PdfWriter()
+                    for p_idx in range(indice_pagina - paginas_na_parte + 1, indice_pagina):
+                        writer_valido.add_page(leitor.pages[p_idx])
+
+                    nome_saida = f"{stem_destino}_Parte_{parte:02d}.pdf"
+                    caminho_saida = pasta_temp_adequados / nome_saida
+                    with open(caminho_saida, "wb") as f_out:
+                        writer_valido.write(f_out)
+
+                    parte += 1
+                    writer_atual = PdfWriter()
+                    writer_atual.add_page(pagina)
+                    paginas_na_parte = 1
+
+        if paginas_na_parte > 0:
+            nome_saida = f"{stem_destino}_Parte_{parte:02d}.pdf"
+            caminho_saida = pasta_temp_adequados / nome_saida
+            with open(caminho_saida, "wb") as f_out:
+                writer_atual.write(f_out)
+
+    return sorted(pasta_temp_adequados.glob("*.pdf"), key=chave_ordenacao_cronologica)
+
+
+def criar_zip_da_pasta(pasta_origem: Path, caminho_zip: Path):
+    """Compacta os PDFs em .zip sem recompressão (ZIP_STORED)."""
+    with zipfile.ZipFile(caminho_zip, mode="w", compression=zipfile.ZIP_STORED) as zf:
+        for arquivo in sorted(pasta_origem.glob("*.pdf"), key=chave_ordenacao_cronologica):
+            zf.write(arquivo, arcname=arquivo.name)
+
+
+def fechar_e_salvar_pacote(indice_pacote: int, arquivos_pacote: list[Path], pasta_saida: Path):
+    nome_pasta = gerar_nome_pasta_cronologica(indice_pacote, arquivos_pacote)
+    pasta_destino = pasta_saida / nome_pasta
+    pasta_destino.mkdir(parents=True, exist_ok=True)
+
+    for arq in arquivos_pacote:
+        shutil.copy2(arq, pasta_destino / arq.name)
+
+    caminho_zip = pasta_saida / f"{nome_pasta}.zip"
+    criar_zip_da_pasta(pasta_destino, caminho_zip)
+
+    mb_zip = caminho_zip.stat().st_size / (1024 * 1024)
+    print(f"   >>> GERADO: {nome_pasta}.zip ({mb_zip:.2f} MB | {len(arquivos_pacote)} arquivo(s))")
+
+
+def etapa_2_organizar_e_zipar(arquivos_adequados: list[Path], pasta_saida: Path):
+    print()
+    numero_pacote = 1
+    tamanho_acumulado = 0
+    pacote_atual: list[Path] = []
+
+    for pdf in arquivos_adequados:
+        tamanho_pdf = pdf.stat().st_size
+        if tamanho_pdf > LIMITE_BYTES_EXATO:
+            continue
+
+        custo_estimado = tamanho_pdf + 2048
+
+        if (tamanho_acumulado + custo_estimado) <= LIMITE_BYTES_SEGURO:
+            pacote_atual.append(pdf)
+            tamanho_acumulado += custo_estimado
+        else:
+            fechar_e_salvar_pacote(numero_pacote, pacote_atual, pasta_saida)
+            numero_pacote += 1
+            pacote_atual = [pdf]
+            tamanho_acumulado = custo_estimado
+
+    if pacote_atual:
+        fechar_e_salvar_pacote(numero_pacote, pacote_atual, pasta_saida)
+
+
+def processar_subpasta_isolada(subpasta_origem: Path, pasta_saida_geral: Path):
+    print("\n" + "=" * 70)
+    print(f"SECRETARIA: {subpasta_origem.name}")
+    print("=" * 70)
+
+    destino_espelho = pasta_saida_geral / subpasta_origem.name
+    pasta_temp = destino_espelho / "_tmp_adequados"
+    pasta_temp.mkdir(parents=True, exist_ok=True)
+
+    arquivos_adequados = etapa_1_adequar_pdfs(subpasta_origem, pasta_temp)
+    if not arquivos_adequados:
+        print(f"   Nenhum arquivo .PDF encontrado dentro de {subpasta_origem.name}.")
+        shutil.rmtree(destino_espelho)
+        return
+
+    etapa_2_organizar_e_zipar(arquivos_adequados, destino_espelho)
+    shutil.rmtree(pasta_temp)
+
+
+def main():
+    raiz = Path(PASTA_RAIZ)
+    pasta_saida_geral = raiz / NOME_PASTA_SAIDA
+
+    subpastas_originais = sorted([
+        p for p in raiz.iterdir()
+        if p.is_dir() and p.name != NOME_PASTA_SAIDA
+    ])
+
+    if pasta_saida_geral.exists():
+        shutil.rmtree(pasta_saida_geral)
+    pasta_saida_geral.mkdir(parents=True, exist_ok=True)
+
+    print(f"Iniciando processamento isolado para: {[p.name for p in subpastas_originais]}")
+
+    for sub in subpastas_originais:
+        processar_subpasta_isolada(sub, pasta_saida_geral)
+
+    print("\n" + "=" * 70)
+    print("CONCLUÍDO! Confira a pasta:", pasta_saida_geral)
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
